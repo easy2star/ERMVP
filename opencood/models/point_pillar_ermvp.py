@@ -136,19 +136,35 @@ class PointPillarErmvp(nn.Module):
             spatial_features_2d = self.naive_compressor(spatial_features_2d)
             
         N,C,H,W = spatial_features_2d.shape
-        
+        # N,256,100,352
      
         dis_priority = torch.ones([N,H,W]).to('cuda')
         idx = torch.arange(H*W).repeat(N,1,1).permute(2, 0, 1).to('cuda')
+        # idx 是 H*W,N,1  
+        
         #src:N,B,C
         src, sample_reg_loss, sort_confidence_topk, pos_embed = self.sampler(spatial_features_2d, idx, None,dis_priority)
+        # max_num,N,C：乘以特征置信度后的特征向量   
+        # 1维tensor：N个车辆的特征向量的平均值   
+        # N,max_num：前k个最大值置信度对应的索引值   
+        # max_num, N, 1：N个车辆选取的前max_num个特征向量的位置嵌入
+        
         # # # B N C
         src = src.permute(1,0,2)
-        _,s_len,_ = src.shape
+        # N,max_num,C
         
-        cluster_num = max(math.ceil(s_len * self.cluster_sample_ratio), 1)
+        _,s_len,_ = src.shape    # s_len = H*W*ratio = 100*352*0.2 = 7040
 
+        # self.cluster_sample_ratio = 0.2
+        cluster_num = max(math.ceil(s_len * self.cluster_sample_ratio), 1)
+        # cluster_num 是根据采样比例计算的采样数量，确保至少为 1，并且是 s_len 的一定比例（向上取整）。
+        # 从前max_num个最大置信度 数量中采样一定比例的  聚类中心数量
+        # cluster_num = 7040*0.2 = 1408
+
+        # src = N,max_num,C   cluster_num = 1408
         idx_cluster, cluster_num = cluster_dpc_knn(src, cluster_num, 10)
+
+        
         down_dict,idx = merge_tokens(src, idx_cluster, cluster_num, sort_confidence_topk.unsqueeze(2))
         idxxs = []
         for b in range(N):
