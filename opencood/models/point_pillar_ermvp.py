@@ -77,8 +77,8 @@ class PointPillarErmvp(nn.Module):
         if args['backbone_fix']:
             self.backbone_fix()        
         
-        self.topk_ratio = args['comm']['topk_ratio']
-        self.cluster_sample_ratio = args['comm']['cluster_sample_ratio']
+        self.topk_ratio = args['comm']['topk_ratio']    # 0.2
+        self.cluster_sample_ratio = args['comm']['cluster_sample_ratio']    # 0.2
         
         self.sampler = SortSampler(topk_ratio=self.topk_ratio, input_dim=256, score_pred_net='2layer-fc-256')
 
