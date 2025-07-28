@@ -42,11 +42,11 @@ class SortSampler(nn.Module):
         self.norm_feature = nn.LayerNorm(input_dim,elementwise_affine=False)
         self.v_proj = nn.Linear(input_dim, input_dim)
 
-    def forward(self, src, pos_embed, sample_ratio,dis_priority):
+    def forward(self, src, pos_embed, sample_ratio, dis_priority):
 
         bs,c ,h, w  = src.shape
         #各位置的分数
-        src_dis = dis_priority*src.permute(1,0,2,3)
+        src_dis = dis_priority*src.permute(1,0,2,3)  
         src_dis = src_dis.permute(1,0,2,3).float() 
         # print(src_dis.shape)
         sample_weight = self.score_pred_net(src_dis).sigmoid().view(bs,-1)
@@ -54,7 +54,7 @@ class SortSampler(nn.Module):
         # sample_weight.data[mask] = 0.
         sample_weight_clone = sample_weight.clone().detach()
 
-        if sample_ratio==None:
+        if sample_ratio==None:  # None
             sample_ratio = self.topk_ratio
         ##max sample number:
         sample_lens = torch.tensor(h * w * sample_ratio).repeat(bs,1).int()
@@ -66,11 +66,25 @@ class SortSampler(nn.Module):
         sort_confidence_topk_remaining = sort_order[:,min_sample_num:]
         ## flatten for gathering
         src = src.flatten(2).permute(2, 0, 1)
-        src = self.norm_feature(src)
+        src = self.norm_feature(src)  # H*W,N,C
 
-        sample_reg_loss = sample_weight.gather(1,sort_confidence_topk).mean()
-        src_sampled = src.gather(0,sort_confidence_topk.permute(1,0)[...,None].expand(-1,-1,c)) *sample_weight.gather(1,sort_confidence_topk).permute(1,0).unsqueeze(-1)
+        sample_reg_loss = sample_weight.gather(1,sort_confidence_topk).mean()  # N,H*W  sample_weight是各个车辆每个位置的置信度， sort_confidence_topk根据索引选择相应的置信度  N,max_num
+        # gather 用于从一个张量中根据索引提取特定的值。语法：tensor.gather(dim, index)，其中 dim 指定在哪一维上进行索引，index 是索引张量。
+        # sample_weight.gather(1, sort_confidence_topk) 的结果是一个形状为 [N, max_num] 的张量，其中每个元素是从 sample_weight 中根据 sort_confidence_topk 提取的权重值。
+        # 计算提取出来的 [N, max_num] 张量的均值。
+
+        # src是H*W,N,C     sort_confidence_topk.permute(1,0)[...,None].expand(-1,-1,c)是max_num,N,C    表示根据置信度前k个最大值的索引取出来对应的特征值 -> max_num,N,C
+        # sample_weight是N,H*W，是各个车辆每个位置的置信度， sample_weight.gather(1,sort_confidence_topk).permute(1,0).unsqueeze(-1)是N,max_num->max_num,N->max_num,N,1   ， 是根据前k个最大值的索引取出来的置信度
+        # 对选取出来的特征向量乘以该位置的置信权重
+        src_sampled = src.gather(0,sort_confidence_topk.permute(1,0)[...,None].expand(-1,-1,c)) * sample_weight.gather(1,sort_confidence_topk).permute(1,0).unsqueeze(-1)
+      
         # pos_embed_sampled = pos_embed.gather(0,sort_confidence_topk.permute(1,0)[...,None].expand(-1,-1,c))
+
+        # pos_embed 是 H*W,N,1  # 0,1，...,HW-1
+        # sort_confidence_topk.permute(1, 0)[..., None]是max_num,N,1     #  N,max_num -> max_num,N,1
+        # sort_confidence_topk是前k个最大的置信度的索引值，选出相应的位置嵌入
+        # 从 pos_embed 中根据 sort_confidence_topk 提取每个样本的 max_num 个位置嵌入值，结果的形状为 [max_num, N, 1]。
         pos_embed_sampled = pos_embed.gather(0, sort_confidence_topk.permute(1, 0)[..., None])
 
+        # max_num,N,C：乘以特征置信度后的特征向量   1维tensor：N个车辆的特征向量的平均值   N,max_num：前k个最大值置信度对应的索引值   max_num, N, 1：N个车辆选取的前max_num个特征向量的位置嵌入
         return src_sampled, sample_reg_loss, sort_confidence_topk, pos_embed_sampled
