@@ -46,27 +46,45 @@ class SortSampler(nn.Module):
 
         bs,c ,h, w  = src.shape
         #各位置的分数
-        src_dis = dis_priority*src.permute(1,0,2,3)  
-        src_dis = src_dis.permute(1,0,2,3).float() 
+        src_dis = dis_priority*src.permute(1,0,2,3)
+        src_dis = src_dis.permute(1,0,2,3).float()   #  N,C,H,W
         # print(src_dis.shape)
-        sample_weight = self.score_pred_net(src_dis).sigmoid().view(bs,-1)
+        sample_weight = self.score_pred_net(src_dis).sigmoid().view(bs,-1)  # N,H*W
         # sample_weight[mask] = sample_weight[mask].clone() * 0.
         # sample_weight.data[mask] = 0.
         sample_weight_clone = sample_weight.clone().detach()
 
-        if sample_ratio==None:  # None
+        if sample_ratio==None:
             sample_ratio = self.topk_ratio
         ##max sample number:
-        sample_lens = torch.tensor(h * w * sample_ratio).repeat(bs,1).int()
+        sample_lens = torch.tensor(h * w * sample_ratio).repeat(bs,1).int()  # bs,1  每个元素都是h*w*sample_ratio
         max_sample_num = sample_lens.max()
         
-        min_sample_num = sample_lens.min()
-        sort_order = sample_weight_clone.sort(descending=True,dim=1)[1]
-        sort_confidence_topk = sort_order[:,:max_sample_num]
-        sort_confidence_topk_remaining = sort_order[:,min_sample_num:]
+        min_sample_num = sample_lens.min()  # max_sample 与 min_sample是相同的
+        sort_order = sample_weight_clone.sort(descending=True,dim=1)[1]    # sort_order的维度是 N，H*W
+        # 对N，H*W按照第二维进行降序排列
+        # 对每个样本的权重值进行降序排序，并返回排序后的原始位置索引，常用于后续按权重选择 top-k 元素或采样。
+        # tensor([[0.1, 0.5, 0.3],
+        #         [0.7, 0.2, 0.9]])
+        # tensor([[1, 2, 0],
+        #         [2, 0, 1]])
+      
+        sort_confidence_topk = sort_order[:,:max_sample_num]  # 选择根据topk采样的索引
+        sort_confidence_topk_remaining = sort_order[:,min_sample_num:]  # 剩余的索引
         ## flatten for gathering
-        src = src.flatten(2).permute(2, 0, 1)
-        src = self.norm_feature(src)  # H*W,N,C
+        src = src.flatten(2).permute(2, 0, 1)  # N,C,H,W -> H*W,N,C
+        # src.flatten(2)  # 作用：从第 2 维开始（即 H 和 W）展平，变成 [N, C, H*W]
+        # .permute(2, 0, 1) # 作用：重新排列维度顺序，把展平后的 H*W 放在最前面，N 放中间，C 放最后
+        # 这是 Transformer 中常见的预处理步骤，把图像的每个空间位置（H*W）看作一个 token，每个 token 有 C 个通道特征
+        
+        src = self.norm_feature(src)
+        # nn.LayerNorm 默认是对最后一维做归一化，因此：
+        # 输入必须是 [*, input_dim] 的形状。
+        # 你现在的 src 是 [H*W, N, C]，最后一维是 C，正好符合要求。
+        # elementwise_affine=False 表示不学习缩放和平移参数（即只做归一化，不做 γ 和 β）。
+
+
+      
 
         sample_reg_loss = sample_weight.gather(1,sort_confidence_topk).mean()  # N,H*W  sample_weight是各个车辆每个位置的置信度， sort_confidence_topk根据索引选择相应的置信度  N,max_num
         # gather 用于从一个张量中根据索引提取特定的值。语法：tensor.gather(dim, index)，其中 dim 指定在哪一维上进行索引，index 是索引张量。
