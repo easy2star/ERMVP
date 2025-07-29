@@ -163,16 +163,19 @@ class PointPillarErmvp(nn.Module):
 
         # src = N,max_num,C   cluster_num = 1408
         idx_cluster, cluster_num = cluster_dpc_knn(src, cluster_num, 10)
+        # [N, max_num]   1408
 
+        # N,max_num,C   [N, max_num]   1408   N,max_num,1 
+        down_dict, idx = merge_tokens(src, idx_cluster, cluster_num, sort_confidence_topk.unsqueeze(2))
+        # [N, cluster_num, C]    [N, max_num]
         
-        down_dict,idx = merge_tokens(src, idx_cluster, cluster_num, sort_confidence_topk.unsqueeze(2))
         idxxs = []
         for b in range(N):
             i = torch.arange(s_len)
             idxxs.append(idx[b][i])
         idxxs = torch.vstack(idxxs)
 
-        src = index_points(down_dict,idxxs)
+        src = index_points(down_dict, idxxs)
         src = src.permute(0,2,1)
       
         pos_embed = pos_embed.permute(1, 2, 0)
@@ -184,27 +187,20 @@ class PointPillarErmvp(nn.Module):
                 if index < ele:
                     break
                 index = index-ele
-            spatial_feature = torch.zeros(
-                C,H*W,
-                dtype=src.dtype,
-                device=src.device)
+            spatial_feature = torch.zeros(C, H*W, dtype=src.dtype, device=src.device)
             spatial_feature[:, pos_embed[cav_idx][0]] = src[cav_idx]
 
             if index==0:
                 spatial_feature = spatial_features_2d[cav_idx].flatten(1)
-            # print(timestamp_index)
+
             batch_spatial_features.append(spatial_feature)
 
 
-        batch_spatial_features = \
-            torch.stack(batch_spatial_features, 0)
-        batch_spatial_features = \
-            batch_spatial_features.view(N,C,H,W)
+        batch_spatial_features = torch.stack(batch_spatial_features, 0)
+        batch_spatial_features = batch_spatial_features.view(N,C,H,W)
         
-        # spatial_features_2d = batch_spatial_features
-        # batch_dict['spatial_features'] = batch_spatial_features
 
-        ego_features = get_ego_feature(spatial_features_2d,record_len)
+        ego_features = get_ego_feature(spatial_features_2d, record_len)
         
         regroup_feature, mask = regroup(spatial_features_2d,
                                         record_len,
@@ -220,16 +216,14 @@ class PointPillarErmvp(nn.Module):
         fused_feature = self.fusion_net(regroup_feature, com_mask)
         
         psm = self.cls_head(fused_feature)
-        rm = self.reg_head(fused_feature)
+        rm  = self.reg_head(fused_feature)
 
         ego_psm = self.cls_head(ego_features)
-        ego_rm = self.reg_head(ego_features)
+        ego_rm  = self.reg_head(ego_features)
 
         output_dict = {'psm': psm,
                        'rm': rm,
                        'psm_ego': ego_psm,
-                       'rm_ego': ego_rm,
-                       }
-
+                       'rm_ego': ego_rm,}
 
         return output_dict
