@@ -1,6 +1,8 @@
 import torch
 import math
 
+# merge_tokens 把 7040 个 token → 1408 个簇中心，用 加权平均 合并特征，并返回聚合后的特征及簇映射。
+# N,max_num,C   [N, max_num]   1408   N,max_num,1 
 def merge_tokens(x, idx_cluster, cluster_num, token_weight=None):
     """Merge tokens in the same cluster to a single cluster.
     Implemented by torch.index_add(). Flops: B*N*(C+2)
@@ -13,15 +15,15 @@ def merge_tokens(x, idx_cluster, cluster_num, token_weight=None):
         cluster_num (int): cluster number
         token_weight (Tensor[B, N, 1]): weight for each token.
     """
-    B, N, C = x.shape
-    #B,N
-    idx_token = torch.arange(N)[None, :].repeat(B, 1)
+    B, N, C = x.shape    # N,max_num,C
+    # B,N
+    idx_token = torch.arange(N)[None, :].repeat(B, 1)    # N,max_num
     # idx_token = torch.arange(N)[None, :].repeat(B, 1).to(device)
-    agg_weight = x.new_ones(B, N, 1)
+    agg_weight = x.new_ones(B, N, 1)    # N,max_num,1
     if token_weight is None:
         token_weight = x.new_ones(B, N, 1)
-    #[[0]]
-    idx_batch = torch.arange(B, device=x.device)[:, None]
+    # [[0]]
+    idx_batch = torch.arange(B, device=x.device)[:, None]    # N,1
     idx = idx_cluster + idx_batch * cluster_num
 
     all_weight = token_weight.new_zeros(B * cluster_num, 1)
@@ -45,8 +47,13 @@ def merge_tokens(x, idx_cluster, cluster_num, token_weight=None):
     out_dict = {}
     out_dict['x'] = x_merged
     out_dict['token_num'] = cluster_num
-    return x_merged,idx_token_new
 
+    # [N, cluster_num, C]    [N, max_num]
+    return x_merged, idx_token_new
+
+
+# index_points 把 points 中每个 batch 内由 idx 指定的 1408 个索引对应的特征向量取出来，返回形状 [N, 1408, max_num] 的张量 new_points。
+# dist_matrix：[N, max_num, max_num]   index_down：[N, 1408]
 def index_points(points, idx):
     """Sample features following the index.
     Returns:
@@ -57,14 +64,28 @@ def index_points(points, idx):
         idx: sample index data, [B, S]
     """
     device = points.device
-    B = points.shape[0]
-    view_shape = list(idx.shape)
-    view_shape[1:] = [1] * (len(view_shape) - 1)
-    repeat_shape = list(idx.shape)
-    repeat_shape[0] = 1
+    B = points.shape[0]    # N
+    view_shape = list(idx.shape)    # [N, 1408]
+    view_shape[1:] = [1] * (len(view_shape) - 1)    # [1]
+    repeat_shape = list(idx.shape)    # [N,1408]
+    repeat_shape[0] = 1    # [1,1408]
+    
     batch_indices = torch.arange(B, dtype=torch.long).to(device).view(view_shape).repeat(repeat_shape)
+    # 生成与 idx 同形的 batch 索引：[[0,...,0],[1,...,1],...,[N-1,...,N-1]]
+    
     new_points = points[batch_indices, idx, :]
+    # points: [N,max_num,max_num]
+    # batch_indices: [N,1408]
+    # idx: [N,1408]
+    # 按 batch_indices 和 idx 双索引采样，得到 [N, 1408, max_num]
+    
+    # batch_indices 形状 [N, 1408]
+    # 第 i 行全填 i，用来指明“取第 i 辆车”。
+    # idx 形状 [N, 1408]
+    # 里面存的是要从 max_num 个位置里挑出的 1408 个索引（聚类中心）。
+    
     return new_points
+
 
 # 计算局部密度:
 # 对于每个特征向量，计算其与 k 个最近邻的距离。
@@ -187,18 +208,47 @@ def cluster_dpc_knn(x, cluster_num, k=5):
         # index_parent：最小值的索引，形状为 [N, max_num]。
         
         # select clustering center according to score
+        # dist: [N, max_num]    density: [N, max_num]    max_num = 100*352*0.2 = 7040 
         score = dist * density
-        _, index_down = torch.topk(score, k=cluster_num, dim=-1)
-
+        _, index_down = torch.topk(score, k=cluster_num, dim=-1)    # 选取1408个聚类中心（7040*0.2 = 1408）
+        # 输出 index_down 的形状为 [N, 1408]，可直接用于后续 mask 或索引操作。
+        
         # assign tokens to the nearest center
+        # dist_matrix：[N, max_num, max_num]   index_down：[N, 1408]
+        # points 确实是 [N, max_num, max_num]（即每个样本保存的是整辆车的 pairwise 距离矩阵，而不是特征向量）。
         dist_matrix = index_points(dist_matrix, index_down)
+        # 对第 i 辆车，先按 idx[i] 挑出 1408 个“中心索引”，然后把这 1408 个中心对应的 整行距离向量（长度 max_num）取出来。
+        # 最终得到 new_points 的形状是 [N, 1408, max_num]——即每辆车只保留 1408 个中心点的完整距离向量。
 
+        # 把 dist_matrix（形状 [N, max_num, max_num]）按 index_down（形状 [N, 1408]）采样后，得到
+        # “中心点 ↔ 所有点” 的精简距离矩阵：
+        # [N, 1408, max_num]
+        # 第 i 辆车：1408 行，每行长度 max_num，表示“某个中心点到 7040 个点的距离”。
+        
         idx_cluster = dist_matrix.argmin(dim=1)
+        # 沿着 1408 这一维取最小值索引，得到形状 [N, max_num] 的 idx_cluster。
+        # 含义：
+        # 对每个原始点（共 7040 个），找到距离最近的 中心点编号（0–1407）。
+        # 于是所有 7040 个点就被划分到了 1408 个簇里。
 
         # make sure cluster center merge to itself
         idx_batch = torch.arange(B, device=x.device)[:, None].expand(B, cluster_num)
+        # [N, 1408]
+        # 结果：每行都是该车编号，用于 “按车” 索引。
+
         idx_tmp   = torch.arange(cluster_num, device=x.device)[None, :].expand(B, cluster_num)
+        # [N, 1408]
+        # 结果：每列都是簇编号，用于 “按簇” 索引。
+        
         idx_cluster[idx_batch.reshape(-1), index_down.reshape(-1)] = idx_tmp.reshape(-1)
+        # 这行代码把 “每个簇的中心点” 的簇号写进 idx_cluster，从而完成 “中心点 → 簇号” 的映射。
+        # 逐维解释（形状先摊平为一维，再还原）：
+        # idx_cluster 形状 [N * max_num]（= N * 7040），初始时保存的是 每个原始点所属簇的编号（0 … 1407）。
+        # index_down 形状 [N, 1408]，存的是 1408 个中心点在原始 7040 个位置中的索引。
+        # idx_tmp 形状 [N, 1408]，存的是 簇号 0 … 1407。
+
+        # 在 idx_cluster 中，把这 1408 个中心点对应的条目 覆盖成自己的簇号 0…1407，其余条目保持不变。
+        # 最终 idx_cluster 仍保持 [N, max_num]（或摊平 [N*max_num]），但中心点位置已明确标为簇号，后续可直接按簇号聚合。
 
     return idx_cluster, cluster_num
 
